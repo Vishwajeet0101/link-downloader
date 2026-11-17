@@ -559,7 +559,8 @@ async function loadRecent() {
       a.href = fileLink(f.name); a.setAttribute("download", f.name);
       if (isLocal) a.onclick = e => { e.preventDefault(); api("/api/open", { name: f.name }); };
       a.innerHTML = '<span class="n"></span><span class="s"></span>';
-      a.querySelector(".n").textContent = (/\.(mp3|m4a)$/i.test(f.name) ? "🎵 " : /\.zip$/i.test(f.name) ? "🗂 " : "🎬 ") + f.name;
+      a.querySelector(".n").textContent = (/\.(mp3|m4a|opus|wav)$/i.test(f.name) ? "🎵 " : /\.zip$/i.test(f.name) ? "🗂 "
+        : /\.(jpe?g|png|webp|gif|heic|avif)$/i.test(f.name) ? "📷 " : /\.(mp4|mkv|webm|mov)$/i.test(f.name) ? "🎬 " : "📄 ") + f.name;
       a.querySelector(".s").textContent = f.size + (isLocal ? "" : " ⬇");
       $("recent").appendChild(a);
     });
