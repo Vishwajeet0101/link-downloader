@@ -281,7 +281,8 @@ class DualStackServer(ThreadingHTTPServer):
     allow_reuse_address = False          # on Windows "reuse" lets a 2nd copy grab the same port
 
     def server_bind(self):
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):      # Windows only - Linux servers (Render) don't have it
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         super().server_bind()
 
