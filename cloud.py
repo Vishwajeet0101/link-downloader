@@ -7,7 +7,7 @@ import engine
 import server
 
 if not server.load_settings()["pin"]:
-    sys.exit("Set the APP_PIN secret (digits only) in the Space settings.")
+    sys.exit("APP_PIN is missing: add it (digits only) under Environment in the Render dashboard.")
 
 threading.Thread(target=engine.cleanup_loop, daemon=True).start()
 httpd = server.make_server(retries=1)
