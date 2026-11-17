@@ -18,6 +18,10 @@ OUT_DIR = Path(os.environ.get("OUT_DIR") or Path.home() / "Downloads" / "Downloa
 CLOUD = os.environ.get("CLOUD") == "1"
 MAX_JOBS = threading.BoundedSemaphore(3 if CLOUD else 50)   # a free server is small: 3 downloads at a time
 COOKIES = ROOT / "cookies.txt"          # optional: browser-exported cookies for private posts
+if CLOUD and Path("/etc/secrets/cookies.txt").exists():
+    # Render "Secret File" (read-only) -> writable copy, because yt-dlp saves cookies back when it finishes
+    COOKIES = Path("/tmp/cookies.txt")
+    shutil.copyfile("/etc/secrets/cookies.txt", COOKIES)
 
 VIDEO_HEIGHTS = [2160, 1440, 1080, 720, 480, 360]
 QUALITY_NAMES = {2160: "4K", 1440: "2K", 1080: "Full HD", 720: "HD", 480: "SD", 360: "Low"}
@@ -125,13 +129,18 @@ def friendly_error(e):
     low = msg.lower()
     if "unsupported url" in low:
         return "This link isn't supported. Paste a YouTube, Instagram (or other video site) link."
+    site = "YouTube" if "youtube" in low or "[youtube" in low else "Instagram" if "instagram" in low else "The site"
+    if "sign in to confirm" in low or "not a bot" in low:       # check first: this message also mentions cookies
+        if CLOUD:
+            return ("YouTube is blocking this server (it does that to cloud servers). "
+                    "The laptop app still works for YouTube.")
+        return "YouTube wants a sign-in for this video. Add cookies.txt to the Downloader folder and try again."
     if "login" in low or "private" in low or "rate-limit" in low or "cookies" in low:
+        if CLOUD:
+            return (f"{site} is blocking this server or the post is private. "
+                    "The laptop app still works - or the website owner can add a cookies.txt login.")
         return ("This post needs a login (private account or Instagram is rate-limiting). "
                 "Put a cookies.txt from your browser in the Downloader folder and try again.")
-    if "sign in to confirm" in low or "not a bot" in low:
-        if CLOUD:
-            return "YouTube is blocking the server right now (it does this to cloud servers). Try again later or another video."
-        return "YouTube wants a sign-in for this video. Add cookies.txt to the Downloader folder and try again."
     if "larger than max-filesize" in low or "file is larger" in low:
         return "That file is too big for the online version (limit 2 GB). Pick a lower quality."
     if "video unavailable" in low or "404" in low:
