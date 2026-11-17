@@ -238,13 +238,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": engine.friendly_error(e)})
         if path == "/api/download":
             link, option = (body.get("url") or "").strip(), body.get("option") or ""
-            is_video = option[:1] == "v" and option[1:].isdigit()
-            if not link.startswith(("http://", "https://")) or not (is_video or option in {o[0] for o in engine.AUDIO_OPTIONS}):
+            is_video = (option[:1] == "v" and option[1:].isdigit()) or \
+                (option[:2] == "f:" and 0 < len(option) <= 60 and all(c.isalnum() or c in "-_." for c in option[2:]))
+            plain = option in ("photo", "file")              # photos / direct files don't need ffmpeg
+            if not link.startswith(("http://", "https://")) or not (is_video or plain or option in {o[0] for o in engine.AUDIO_OPTIONS}):
                 return self._json(400, {"error": "Pick a format first."})
-            if not engine.ffmpeg_dir():
+            if not plain and not engine.ffmpeg_dir():
                 return self._json(400, {"error": "ffmpeg is missing on the laptop. Run: winget install Gyan.FFmpeg"})
             job_id = engine.start_download(link, option, body.get("title", ""), int(body.get("count") or 1),
-                                           body.get("label", "") if option.startswith("v") else "")
+                                           body.get("label", "") if is_video else "")
             return self._json(200, {"id": job_id})
 
         # laptop-only actions
@@ -356,7 +358,7 @@ button:disabled{opacity:.5;cursor:default}
 @keyframes s{to{transform:rotate(360deg)}}
 </style></head><body><main>
 <h1><img src="/icon.svg" alt="">Link Downloader</h1>
-<p class="sub">YouTube, Instagram reels &amp; posts, and many more sites</p>
+<p class="sub">YouTube, Instagram (reels, posts, photos), Facebook, X, TikTok, 1000+ sites &amp; direct file links</p>
 
 <div id="pinCard" class="card hide">
   <b>Enter the PIN</b><p class="meta">On the laptop: under "Open on phone". Online: ask the person who shared the link.</p>
@@ -383,7 +385,7 @@ button:disabled{opacity:.5;cursor:default}
 
 <div id="result" class="card hide">
   <div class="preview"><img id="thumb" alt="" referrerpolicy="no-referrer"><div><div id="title" class="t"></div><div id="meta" class="meta"></div></div></div>
-  <div class="tabs"><button data-tab="video" class="on">🎬 Video</button><button data-tab="audio">🎵 Audio</button></div>
+  <div class="tabs"><button data-tab="video" class="on">🎬 Video</button><button data-tab="audio">🎵 Audio</button><button data-tab="photo">📷 Photo</button><button data-tab="file">📄 File</button></div>
   <div id="opts" class="opts"></div>
   <button id="dl" class="go" disabled>Download</button>
   <div id="prog" class="hide">
@@ -475,7 +477,9 @@ async function find() {
     $("thumb").src = info.thumbnail || "/icon.svg";
     $("title").textContent = info.title;
     $("meta").textContent = [info.site, info.uploader, fmtTime(info.duration), info.count > 1 ? info.count + " items" : ""].filter(Boolean).join(" · ");
-    tab = info.video.length ? "video" : "audio"; choice = null;
+    const kinds = ["video", "audio", "photo", "file"];
+    document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("hide", !(info[b.dataset.tab] || []).length));
+    tab = kinds.find(k => (info[k] || []).length) || "video"; choice = null;
     renderOpts(); resetDl();
     $("result").classList.remove("hide");
   } catch (e) { info = null; curUrl = ""; $("err").textContent = e.message; }
@@ -486,9 +490,9 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { tab =
 
 function renderOpts() {
   document.querySelectorAll(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
-  const list = info[tab];
+  const list = info[tab] || [];
   $("opts").innerHTML = "";
-  if (!list.length) $("opts").innerHTML = '<p class="meta">No ' + tab + ' in this link.</p>';
+  if (!list.length) { $("opts").innerHTML = '<p class="meta">No ' + tab + ' in this link.</p>'; $("dl").disabled = true; }
   // default pick: 1080p if it exists, otherwise the best one (video); MP3 320 (audio)
   const def = Math.max(0, list.findIndex(o => o.label === "1080p"));
   list.forEach((o, i) => {

@@ -129,7 +129,9 @@ def friendly_error(e):
     low = msg.lower()
     if "unsupported url" in low:
         return "This link isn't supported. Paste a YouTube, Instagram (or other video site) link."
-    site = "YouTube" if "youtube" in low or "[youtube" in low else "Instagram" if "instagram" in low else "The site"
+    import re
+    tag = re.search(r"\[([a-z0-9:_-]+)\]", low)
+    site = {"youtube": "YouTube", "instagram": "Instagram"}.get(tag.group(1).split(":")[0], tag.group(1).split(":")[0].title()) if tag else "The site"
     if "sign in to confirm" in low or "not a bot" in low:       # check first: this message also mentions cookies
         if CLOUD:
             return ("YouTube is blocking this server (it does that to cloud servers). "
@@ -139,12 +141,15 @@ def friendly_error(e):
         if CLOUD:
             return (f"{site} is blocking this server or the post is private. "
                     "The laptop app still works - or the website owner can add a cookies.txt login.")
-        return ("This post needs a login (private account or Instagram is rate-limiting). "
+        return (f"{site} needs a login for this (private post, or it is limiting downloads). "
                 "Put a cookies.txt from your browser in the Downloader folder and try again.")
     if "larger than max-filesize" in low or "file is larger" in low:
         return "That file is too big for the online version (limit 2 GB). Pick a lower quality."
     if "video unavailable" in low or "404" in low:
         return "That video is unavailable (deleted, private or blocked in your country)."
+    if ("timed out" in low or "getaddrinfo" in low) and tag and tag.group(1) != "generic":
+        return (f"Couldn't reach {site}. It may be blocked in your country (e.g. TikTok in India) "
+                "or down right now.")
     if "getaddrinfo" in low or "timed out" in low or "connection" in low:
         return "No internet connection (or it's too slow). Check the hotspot and try again."
     return msg[:300]
@@ -185,20 +190,120 @@ def _video_options(formats, duration):
             "size": f"~{size:.0f} MB" if size and size >= 1 else (f"~{size:.1f} MB" if size and size >= 0.1 else ""),
         })
     good = [o for o in options if int(o["label"][:-1]) >= 200]     # drop 144p-style junk if better exists
-    return good or options
+    if good or options:
+        return good or options
+    # Some sites (e.g. Facebook "hd"/"sd") don't say the resolution - offer their formats by name instead.
+    named = [f for f in formats if f.get("vcodec") != "none" and f.get("format_id")
+             and not (f.get("acodec") != "none" and f.get("vcodec") is None and f.get("ext") in ("m4a", "mp3", "aac"))]
+    order = {"hd": 0, "high": 0, "sd": 1, "low": 2}
+    named.sort(key=lambda f: order.get(str(f["format_id"]).lower(), 1))
+    return [{"id": "f:" + str(f["format_id"]), "label": str(f.get("format_note") or f["format_id"]).upper()[:12],
+             "tag": "Best" if i == 0 else "", "ext": (f.get("ext") or "mp4").upper(),
+             "size": f"~{_size_mb(f):.0f} MB" if _size_mb(f) and _size_mb(f) >= 1 else ""}
+            for i, f in enumerate(named[:6])]
+
+
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/140.0 Safari/537.36")
+IMAGE_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+             "image/heic": "heic", "image/avif": "avif"}
+
+
+def _extract(url):
+    """yt-dlp lookup that doesn't fail on photo-only posts (they simply come back without formats)."""
+    import yt_dlp
+    opts = _base_opts() | {"noplaylist": True, "ignore_no_formats_error": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def _items(info):
+    entries = [e for e in (info.get("entries") or []) if e] if info.get("_type") == "playlist" else []
+    return entries or [info]
+
+
+def _has_video(item):
+    return any(f.get("vcodec") not in (None, "none") or f.get("acodec") not in (None, "none")
+               for f in item.get("formats") or [])
+
+
+def _photo_urls(info):
+    """Best-quality image of every photo (not video) item - e.g. Instagram photo posts and carousels."""
+    urls = []
+    for item in _items(info):
+        if _has_video(item):
+            continue
+        thumbs = [t for t in item.get("thumbnails") or [] if t.get("url")]
+        if thumbs:
+            best = max(thumbs, key=lambda t: ((t.get("width") or 0) * (t.get("height") or 0), t.get("preference") or -99))
+            urls.append(best["url"])
+        elif item.get("thumbnail"):
+            urls.append(item["thumbnail"])
+    return urls
+
+
+def _probe_file(url):
+    """For links yt-dlp doesn't know: is it a plain downloadable file (PDF, ZIP, image...)? -> (name, size, type)."""
+    import urllib.parse
+    import urllib.request
+    from email.message import Message
+    req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA, "Range": "bytes=0-0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not ctype or ctype in ("text/html", "application/xhtml+xml"):
+            return None
+        total = r.headers.get("Content-Range", "").rpartition("/")[2] or r.headers.get("Content-Length") or ""
+        msg = Message()
+        msg["content-disposition"] = r.headers.get("Content-Disposition") or ""
+        name = msg.get_filename() or urllib.parse.unquote(Path(urllib.parse.urlparse(r.url).path).name) or "download"
+    name = "".join(c for c in name if c not in r'<>:"/\|?*').strip()[:120] or "download"
+    if "." not in name and ctype in IMAGE_EXT:
+        name += "." + IMAGE_EXT[ctype]
+    size = int(total) if total.isdigit() else 0
+    return name, size, ctype
+
+
+def _file_info(url):
+    probed = _probe_file(url)
+    if not probed:
+        return None
+    name, size, ctype = probed
+    ext = Path(name).suffix.lstrip(".").upper() or ctype.split("/")[-1].upper()
+    return {"title": name, "uploader": "", "site": "Direct file", "thumbnail": url if ctype.startswith("image/") else "",
+            "duration": None, "count": 1, "video": [], "audio": [], "photo": [],
+            "file": [{"id": "file", "label": "Original file", "tag": f"{size / 1_048_576:.1f} MB" if size else "",
+                      "ext": ext, "size": ""}],
+            "ffmpeg": bool(ffmpeg_dir())}
 
 
 def get_info(url):
-    import yt_dlp
-    opts = _base_opts() | {"noplaylist": True, "extract_flat": False}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        info = _extract(url)
+    except Exception as e:  # noqa: BLE001
+        low = str(e).lower()
+        if "unsupported url" in low or "[generic]" in low:     # not a video site -> maybe a direct file link
+            try:
+                found = _file_info(url)
+            except Exception:  # noqa: BLE001
+                found = None
+            if found:
+                return found
+        raise
     entries = [e for e in (info.get("entries") or []) if e] if info.get("_type") == "playlist" else []
-    first = entries[0] if entries else info
+    first = next((e for e in entries if _has_video(e)), entries[0] if entries else info)
     formats = first.get("formats") or []
     duration = first.get("duration")
     video = _video_options(formats, duration)
-    has_audio = any(f.get("acodec") != "none" for f in formats) or not formats   # None = unknown, maybe
+    has_audio = any(f.get("acodec") != "none" for f in formats)
+    photos = _photo_urls(info)
+    if not video and not has_audio and not photos:
+        try:
+            found = _file_info(url)
+        except Exception:  # noqa: BLE001
+            found = None
+        if found:
+            return found
+        raise RuntimeError("No video, audio or photo found at this link.")
     return {
         "title": info.get("title") or first.get("title") or "Untitled",
         "uploader": info.get("uploader") or first.get("uploader") or info.get("channel") or "",
@@ -208,6 +313,9 @@ def get_info(url):
         "count": len(entries) or 1,
         "video": video,
         "audio": [{"id": i, "label": a, "tag": t, "ext": e, "size": ""} for i, e, a, t in AUDIO_OPTIONS] if has_audio else [],
+        "photo": [{"id": "photo", "label": "Original", "tag": f"{len(photos)} photo{'s' if len(photos) > 1 else ''}",
+                   "ext": "JPG", "size": ""}] if photos else [],
+        "file": [],
         "ffmpeg": bool(ffmpeg_dir()),
     }
 
@@ -222,7 +330,12 @@ def _download_opts(option, job):
     opts = _base_opts() | {"noplaylist": True, "paths": {"home": str(OUT_DIR), "temp": str(OUT_DIR / ".temp")}}
     if CLOUD:
         opts["max_filesize"] = 2 * 1024 ** 3
-    if option.startswith("v"):
+    if option.startswith("f:"):
+        fid = option[2:]
+        label = job.get("label") or fid.upper()
+        opts["format"] = f"{fid}+ba/{fid}/b"
+        opts["merge_output_format"] = "mp4"
+    elif option.startswith("v"):
         h = int(option[1:])
         label = job.get("label") or f"{h}p"
         # Prefer H.264 + AAC (plays on every phone) but only at the chosen resolution - 4K/2K on
@@ -279,15 +392,64 @@ def _collect_files(info):
     return files
 
 
+def _fetch(url, dest, job, part=0, parts=1):
+    """Plain HTTP download with progress (photos, direct files)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        total, done, t0 = int(r.headers.get("Content-Length") or 0), 0, time.time()
+        if CLOUD and total > 2 * 1024 ** 3:
+            raise RuntimeError("larger than max-filesize")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not dest.suffix and ctype in IMAGE_EXT:
+            dest = _unique(dest.with_name(dest.name + "." + IMAGE_EXT[ctype]))
+        with open(dest, "wb") as f:
+            while chunk := r.read(1 << 18):
+                f.write(chunk)
+                done += len(chunk)
+                speed = done / max(time.time() - t0, 0.1)
+                job.update(status="downloading", speed=f"{speed / 1_048_576:.1f}MiB/s",
+                           percent=round(min(99, (part + (done / total if total else 0)) / parts * 100), 1),
+                           eta=f"{int((total - done) / speed)}s" if total and speed else "")
+    return dest
+
+
+def _unique(path):
+    n = 1
+    original = path
+    while path.exists():
+        path = original.with_name(f"{original.stem} ({n}){original.suffix}")
+        n += 1
+    return path
+
+
+def _download_plain(job, url, option):
+    if option == "file":
+        probed = _probe_file(url)
+        return [_fetch(url, _unique(OUT_DIR / (probed[0] if probed else "download")), job)]
+    urls = _photo_urls(_extract(url))
+    if not urls:
+        raise RuntimeError("No photos found at this link.")
+    base = "".join(c for c in (job["title"] or "Photo") if c not in r'<>:"/\|?*').strip()[:70] or "Photo"
+    files = []
+    for i, u in enumerate(urls):
+        stem = f"{base} {i + 1}" if len(urls) > 1 else base
+        files.append(_fetch(u, OUT_DIR / stem, job, i, len(urls)))
+    return files
+
+
 def _run(job, url, option):
     import yt_dlp
     try:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
         job["status"] = "queued"
-        with MAX_JOBS, yt_dlp.YoutubeDL(_download_opts(option, job)) as ydl:
+        with MAX_JOBS:
             job["status"] = "starting"
-            info = ydl.extract_info(url, download=True)
-        files = _collect_files(info)
+            if option in ("photo", "file"):
+                files = _download_plain(job, url, option)
+            else:
+                with yt_dlp.YoutubeDL(_download_opts(option, job)) as ydl:
+                    files = _collect_files(ydl.extract_info(url, download=True))
         if not files:
             raise RuntimeError("Download finished but no file was found.")
         if len(files) > 1:                 # Instagram carousel -> items in a folder + one zip for the phone
@@ -300,15 +462,14 @@ def _run(job, url, option):
                     z.write(f, f.name)
                     shutil.move(str(f), str(folder / f.name))
             files = [zpath]
-        job.update(status="done", percent=100, file=files[0].name,
-                   size=f"{files[0].stat().st_size / 1_048_576:.1f} MB")
+        job.update(status="done", percent=100, file=files[0].name, size=human_size(files[0].stat().st_size))
     except Exception as e:  # noqa: BLE001 - every failure becomes a message in the page
         job.update(status="error", error=friendly_error(e))
 
 
 def start_download(url, option, title="", count=1, label=""):
     job_id = uuid.uuid4().hex[:10]
-    stages = (count or 1) * (2 if option.startswith("v") else 1)
+    stages = (count or 1) * (2 if option[:1] == "v" else 1)     # video = 2 streams (picture + sound)
     label = "".join(ch for ch in str(label) if ch.isalnum())[:10]     # e.g. "1080p"
     job = {"id": job_id, "status": "starting", "percent": 0, "speed": "", "eta": "", "title": title, "label": label,
            "option": option, "count": count or 1, "stage": 0, "stages": stages, "started": time.time()}
@@ -323,7 +484,11 @@ def recent_files(limit=15):
         return []
     files = [p for p in OUT_DIR.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl"))]
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [{"name": p.name, "size": f"{p.stat().st_size / 1_048_576:.1f} MB"} for p in files[:limit]]
+    return [{"name": p.name, "size": human_size(p.stat().st_size)} for p in files[:limit]]
+
+
+def human_size(n):
+    return f"{n / 1_048_576:.1f} MB" if n >= 102_400 else f"{max(1, round(n / 1024))} KB"
 
 
 def safe_file(name):
