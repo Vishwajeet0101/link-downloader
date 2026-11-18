@@ -227,11 +227,24 @@ def _has_video(item):
                for f in item.get("formats") or [])
 
 
+VIDEO_ONLY_SITES = {"youtube", "vimeo", "twitch", "dailymotion"}
+
+
+def _blocked_video(item):
+    """A video whose streams the site refused to give (only its thumbnail/storyboard came back) - not a photo."""
+    if _has_video(item):
+        return False
+    return (str(item.get("extractor_key") or item.get("ie_key") or "").lower() in VIDEO_ONLY_SITES
+            or bool(item.get("duration"))
+            or any("storyboard" in str(f.get("format_note") or f.get("format_id") or "").lower()
+                   for f in item.get("formats") or []))
+
+
 def _photo_urls(info):
     """Best-quality image of every photo (not video) item - e.g. Instagram photo posts and carousels."""
     urls = []
     for item in _items(info):
-        if _has_video(item):
+        if _has_video(item) or _blocked_video(item):
             continue
         thumbs = [t for t in item.get("thumbnails") or [] if t.get("url")]
         if thumbs:
@@ -297,6 +310,13 @@ def get_info(url):
     has_audio = any(f.get("acodec") != "none" for f in formats)
     photos = _photo_urls(info)
     if not video and not has_audio and not photos:
+        if any(_blocked_video(i) for i in _items(info)):
+            site = info.get("extractor_key") or "The site"
+            if CLOUD:
+                raise RuntimeError(f"{site} is blocking this server, so only the thumbnail came back. "
+                                   "The laptop app still works for this link.")
+            raise RuntimeError(f"{site} didn't send the video (only its thumbnail). Click 'Update engine' "
+                               "and try again.")
         try:
             found = _file_info(url)
         except Exception:  # noqa: BLE001
